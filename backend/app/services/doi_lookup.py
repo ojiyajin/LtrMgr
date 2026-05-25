@@ -166,12 +166,28 @@ async def fetch_pdf_url_from_doi(doi: str) -> Optional[str]:
         logging.warning("Unpaywall request failed for DOI %s: %s", doi, exc)
         return None
 
-    best = data.get("best_oa_location") or {}
-    if best.get("url_for_pdf"):
-        return best["url_for_pdf"]
-    for loc in data.get("oa_locations", []):
-        if loc.get("url_for_pdf"):
-            return loc["url_for_pdf"]
+    paper_oa_status = data.get("oa_status", "")
+
+    # Collect PDF URLs, preferring repository-hosted copies (green OA).
+    # Publisher-hosted PDFs for bronze OA papers are typically blocked at the
+    # IP level (e.g. Wiley), so skip them when the paper is bronze OA.
+    repo_urls: list[str] = []
+    pub_urls: list[str] = []
+    seen: set[str] = set()
+
+    all_locs = [data.get("best_oa_location") or {}] + list(data.get("oa_locations", []))
+    for loc in all_locs:
+        url = loc.get("url_for_pdf")
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        if loc.get("host_type") == "repository":
+            repo_urls.append(url)
+        elif paper_oa_status != "bronze":
+            pub_urls.append(url)
+
+    for url in repo_urls + pub_urls:
+        return url
     return None
 
 

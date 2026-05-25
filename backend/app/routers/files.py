@@ -44,8 +44,9 @@ async def _get_setting(db: AsyncSession, key: str) -> str | None:
     return s.value if s else None
 
 
-def _make_pdf_filename(template: str, doc: Document, original: str) -> str:
-    c = doc.citation
+def _make_pdf_filename(template: str, doc: Document, original: str, citation: Citation | None = None) -> str:
+    # Accept citation explicitly to avoid async-incompatible lazy loading of doc.citation.
+    c = citation
     first_author = ""
     if c and c.authors:
         first = c.authors.split(",")[0].strip()
@@ -119,7 +120,11 @@ async def upload_file(
     rename_tpl = await _get_setting(db, "pdf_rename_template")
     save_dir = await _get_setting(db, "pdf_save_dir")
 
-    final_name = _make_pdf_filename(rename_tpl, doc, original_name) if rename_tpl else original_name
+    existing_cit: Citation | None = None
+    if rename_tpl:
+        cit_r = await db.execute(select(Citation).where(Citation.document_id == doc_id))
+        existing_cit = cit_r.scalar_one_or_none()
+    final_name = _make_pdf_filename(rename_tpl, doc, original_name, citation=existing_cit) if rename_tpl else original_name
     dest = _resolve_path(pdf_file.id, final_name, save_dir, is_md=False)
 
     with open(dest, "wb") as f:
@@ -175,7 +180,11 @@ async def fetch_pdf_from_doi(
 
     pdf_url = await resolve_pdf_url(cit.doi)
     if not pdf_url:
-        raise HTTPException(status_code=404, detail="PDFが見つかりませんでした（オープンアクセスでない可能性があります）")
+        doi_link = f"https://doi.org/{cit.doi}"
+        raise HTTPException(
+            status_code=404,
+            detail=f"PDFが見つかりませんでした（オープンアクセスでない可能性があります）。手動でダウンロードしてください: {doi_link}",
+        )
 
     rename_tpl = await _get_setting(db, "pdf_rename_template")
     save_dir = await _get_setting(db, "pdf_save_dir")
@@ -186,7 +195,7 @@ async def fetch_pdf_from_doi(
     if not url_name.endswith(".pdf"):
         url_name += ".pdf"
 
-    final_name = _make_pdf_filename(rename_tpl, doc, url_name) if rename_tpl else url_name
+    final_name = _make_pdf_filename(rename_tpl, doc, url_name, citation=cit) if rename_tpl else url_name
 
     pdf_file = PDFFile(document_id=doc_id, filename=final_name, path="", text_content=None)
     db.add(pdf_file)
@@ -195,9 +204,20 @@ async def fetch_pdf_from_doi(
     dest = _resolve_path(pdf_file.id, final_name, save_dir, is_md=False)
 
     try:
-        headers = {"User-Agent": f"LtrMgr/1.0 (mailto:{settings.crossref_email})", "Accept": "application/pdf,application/octet-stream;q=0.9,*/*;q=0.5", "Referer": "https://doi.org/"}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "application/pdf,*/*",
+            "Accept-Language": "ja,en;q=0.9",
+            "Referer": "https://doi.org/",
+        }
         async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
             r = await client.get(pdf_url, headers=headers)
+            if r.status_code == 403:
+                doi_link = f"https://doi.org/{cit.doi}"
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"出版社がアクセスをブロックしました。手動でダウンロードしてください: {doi_link}",
+                )
             if r.status_code != 200:
                 raise HTTPException(status_code=502, detail=f"PDFのダウンロードに失敗しました (HTTP {r.status_code})")
             ct = r.headers.get("content-type", "")

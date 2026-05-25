@@ -1,0 +1,50 @@
+# ── Python ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# 仮想環境
+backend/venv/
+backend/.venv/
+.venv/
+
+# ── データ・アップロード ─────────────────────────────────
+# データベース（ローカルデータは共有しない）
+backend/ltrmgr.db
+backend/ltrmgr.db-shm
+backend/ltrmgr.db-wal
+
+# アップロードされたPDF・Markdownファイル
+backend/uploads/
+
+# PDFの保存先として設定する任意ディレクトリは除外対象外（パスは設定次第）
+
+# ── フロントエンド ──────────────────────────────────────
+frontend/node_modules/
+frontend/dist/
+
+# フロントエンドビルド成果物（バックエンドがserveする）
+backend/static_frontend/
+
+# TypeScript ビルドキャッシュ
+frontend/tsconfig.tsbuildinfo
+
+# ── 環境設定 ────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── エディタ・OS ─────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ── Claude Code ──────────────────────────────────────────
+.claude/
+
+# ── 作業用一時ファイル ───────────────────────────────────
+修正.txt
+markdown_rendering_improvement_proposal.txt

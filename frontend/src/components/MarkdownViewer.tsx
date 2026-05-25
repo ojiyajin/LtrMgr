@@ -6,8 +6,15 @@ import 'katex/dist/katex.min.css'
 import { getFileContent } from '../api/documents'
 import { preprocessMath } from '../utils/mathPreprocess'
 
+// Coordinates stored as fractions [0, 1] of canvas CSS dimensions.
+// This makes strokes device/orientation-invariant: after a rotation that
+// changes the canvas size, fractional coords still map to the same
+// proportional position in the document.
 type Pt = { x: number; y: number }
 type MdStroke = { pts: Pt[]; color: string; width: number; eraser: boolean; highlighter: boolean }
+
+// v2 key — incompatible format change (absolute px → fractions)
+const STORAGE_KEY = (fileId: string) => `md_markup_v2_${fileId}`
 
 export interface MarkdownMarkupHandle {
   undo: () => void
@@ -45,22 +52,25 @@ export function MarkdownViewer({
   const [error, setError] = useState(false)
 
   const contentDivRef = useRef<HTMLDivElement>(null)
+  // Main canvas: completed strokes only. Never cleared during an active stroke.
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  // Overlay canvas: the single in-progress highlighter stroke.
+  // Drawn as one complete path on every pointermove to avoid alpha accumulation.
+  const overlayRef = useRef<HTMLCanvasElement>(null)
   const strokes = useRef<MdStroke[]>([])
   const drawing = useRef(false)
   const curPts = useRef<Pt[]>([])
   const canvasRectRef = useRef<DOMRect | null>(null)
-  // For touch scroll relay when markupEnabled
   const touchScrollStart = useRef<{ y: number; scrollTop: number } | null>(null)
 
   // Mutable refs — native event handlers read these without stale closures
-  const toolRef = useRef(tool)
-  const colorRef = useRef(color)
-  const lineWidthRef = useRef(lineWidth)
-  const markupEnabledRef = useRef(markupEnabled)
-  const fileIdRef = useRef(fileId)
-  const onCountRef = useRef(onStrokeCountChange)
-  const scrollRefRef = useRef(scrollRef)
+  const toolRef           = useRef(tool)
+  const colorRef          = useRef(color)
+  const lineWidthRef      = useRef(lineWidth)
+  const markupEnabledRef  = useRef(markupEnabled)
+  const fileIdRef         = useRef(fileId)
+  const onCountRef        = useRef(onStrokeCountChange)
+  const scrollRefRef      = useRef(scrollRef)
   useEffect(() => { toolRef.current = tool }, [tool])
   useEffect(() => { colorRef.current = color }, [color])
   useEffect(() => { lineWidthRef.current = lineWidth }, [lineWidth])
@@ -77,10 +87,10 @@ export function MarkdownViewer({
       .catch(() => setError(true))
   }, [docId, fileId])
 
-  // Load saved strokes from localStorage whenever file changes
+  // Load saved strokes whenever the file changes
   useEffect(() => {
     strokes.current = []
-    const saved = localStorage.getItem(`md_markup_${fileId}`)
+    const saved = localStorage.getItem(STORAGE_KEY(fileId))
     if (!saved) return
     try {
       const parsed = JSON.parse(saved)
@@ -91,6 +101,9 @@ export function MarkdownViewer({
     } catch {}
   }, [fileId])
 
+  // Draw all completed strokes on the main canvas.
+  // Coordinates are stored as fractions [0,1]; multiply by canvas physical
+  // dimensions to get the correct pixel position at any canvas size.
   const redraw = useCallback(() => {
     const canvas = canvasRef.current
     if (!canvas) return
@@ -117,19 +130,21 @@ export function MarkdownViewer({
         ctx.lineWidth = s.width * dpr
       }
       ctx.beginPath()
-      ctx.moveTo(s.pts[0].x * dpr, s.pts[0].y * dpr)
-      for (const p of s.pts.slice(1)) ctx.lineTo(p.x * dpr, p.y * dpr)
+      ctx.moveTo(s.pts[0].x * canvas.width, s.pts[0].y * canvas.height)
+      for (const p of s.pts.slice(1)) ctx.lineTo(p.x * canvas.width, p.y * canvas.height)
       ctx.stroke()
       ctx.restore()
     }
   }, [])
 
-  // Resize canvas to match the content div's natural (layout) dimensions.
-  // fontScale changes the font-size, causing the content div to grow/shrink naturally.
-  // The canvas must match the content div's natural dimensions exactly.
+  // redrawRef lets the useEffect([]) closure always call the latest redraw
+  const redrawRef = useRef(redraw)
+  useEffect(() => { redrawRef.current = redraw }, [redraw])
+
   const resizeCanvas = useCallback(() => {
-    const canvas = canvasRef.current
-    const div = contentDivRef.current
+    const canvas  = canvasRef.current
+    const overlay = overlayRef.current
+    const div     = contentDivRef.current
     if (!canvas || !div) return
     const dpr = window.devicePixelRatio || 1
     const rect = div.getBoundingClientRect()
@@ -142,11 +157,16 @@ export function MarkdownViewer({
       canvas.height = hPx
       canvas.style.width  = w + 'px'
       canvas.style.height = h + 'px'
+      if (overlay) {
+        overlay.width  = wPx
+        overlay.height = hPx
+        overlay.style.width  = w + 'px'
+        overlay.style.height = h + 'px'
+      }
       redraw()
     }
   }, [redraw])
 
-  // ResizeObserver: keep canvas sized to content at all times.
   useEffect(() => {
     const div = contentDivRef.current
     if (!div) return
@@ -156,24 +176,58 @@ export function MarkdownViewer({
     return () => ro.disconnect()
   }, [resizeCanvas])
 
-  // Re-size canvas whenever fontScale changes (content reflows with new font-size).
   useEffect(() => {
     resizeCanvas()
   }, [fontScale, resizeCanvas])
 
-  // Attach native pointer event listeners to the canvas ONCE on mount.
-  // IMPORTANT: the canvas element is always rendered (never conditionally removed),
-  // so canvasRef.current is guaranteed to be non-null here.
+  // Attach native pointer listeners ONCE on mount.
   useEffect(() => {
-    const canvas = canvasRef.current
+    const canvas  = canvasRef.current
+    const overlay = overlayRef.current
     if (!canvas) return
 
     const saveStrokes = () =>
-      localStorage.setItem(`md_markup_${fileIdRef.current}`, JSON.stringify(strokes.current))
+      localStorage.setItem(STORAGE_KEY(fileIdRef.current), JSON.stringify(strokes.current))
+
+    // Draw the in-progress pen or highlighter stroke on the overlay as one complete
+    // path. Always clears first so there is never stale content. Drawing as a single
+    // path (not incremental segments) avoids two artifacts: (1) globalAlpha
+    // accumulation at segment joints for highlighter, and (2) per-segment round-cap
+    // "beads" at each onMove boundary for the pen.
+    const drawCurrentStroke = () => {
+      if (!overlay) return
+      const dpr = window.devicePixelRatio || 1
+      const oCtx = overlay.getContext('2d')!
+      oCtx.clearRect(0, 0, overlay.width, overlay.height)
+      if (curPts.current.length < 2) return
+      const t = toolRef.current
+      oCtx.save()
+      oCtx.lineCap = 'round'
+      oCtx.lineJoin = 'round'
+      if (t === 'highlighter') {
+        oCtx.globalCompositeOperation = 'source-over'
+        oCtx.globalAlpha = 0.38
+        oCtx.strokeStyle = colorRef.current
+        oCtx.lineWidth = lineWidthRef.current * 8 * dpr
+      } else {
+        oCtx.globalCompositeOperation = 'source-over'
+        oCtx.strokeStyle = colorRef.current
+        oCtx.lineWidth = lineWidthRef.current * dpr
+      }
+      oCtx.beginPath()
+      oCtx.moveTo(curPts.current[0].x * overlay.width, curPts.current[0].y * overlay.height)
+      for (const p of curPts.current.slice(1)) oCtx.lineTo(p.x * overlay.width, p.y * overlay.height)
+      oCtx.stroke()
+      oCtx.restore()
+    }
+
+    const clearOverlay = () => {
+      if (!overlay) return
+      overlay.getContext('2d')!.clearRect(0, 0, overlay.width, overlay.height)
+    }
 
     const onDown = (e: PointerEvent) => {
       if (e.pointerType !== 'pen') {
-        // Touch/mouse: relay scroll to the parent container
         if (e.pointerType === 'touch') {
           const sc = scrollRefRef.current?.current
           if (sc) touchScrollStart.current = { y: e.clientY, scrollTop: sc.scrollTop }
@@ -184,18 +238,20 @@ export function MarkdownViewer({
       e.preventDefault()
       canvas.setPointerCapture(e.pointerId)
       drawing.current = true
+      // Cache the bounding rect once per stroke. getBoundingClientRect includes
+      // the full canvas height even when the element extends below the viewport.
       canvasRectRef.current = canvas.getBoundingClientRect()
       const r = canvasRectRef.current
-      const dpr = window.devicePixelRatio || 1
+      // Store coordinates as fractions [0,1] of the canvas CSS dimensions so
+      // they remain valid after orientation changes that alter the canvas size.
       curPts.current = [{
-        x: (e.clientX - r.left) / r.width  * canvas.width  / dpr,
-        y: (e.clientY - r.top)  / r.height * canvas.height / dpr,
+        x: (e.clientX - r.left) / r.width,
+        y: (e.clientY - r.top)  / r.height,
       }]
     }
 
     const onMove = (e: PointerEvent) => {
       if (e.pointerType !== 'pen') {
-        // Relay finger scroll to the parent scroll container
         if (e.pointerType === 'touch' && touchScrollStart.current) {
           const sc = scrollRefRef.current?.current
           if (sc) sc.scrollTop = touchScrollStart.current.scrollTop + (touchScrollStart.current.y - e.clientY)
@@ -208,89 +264,43 @@ export function MarkdownViewer({
       const r = canvasRectRef.current
       if (!r) return
       const dpr = window.devicePixelRatio || 1
-      const ctx = canvas.getContext('2d')!
       const t = toolRef.current
 
-      if (t === 'highlighter') {
-        // Accumulate all new points first, then clear-and-redraw the whole canvas.
-        // Incremental segment drawing causes globalAlpha to accumulate at each
-        // overlap point, making the stroke appear far too dark. Drawing the entire
-        // current stroke as one single path avoids this entirely.
-        for (const ev of evs) {
-          curPts.current.push({
-            x: (ev.clientX - r.left) / r.width  * canvas.width  / dpr,
-            y: (ev.clientY - r.top)  / r.height * canvas.height / dpr,
-          })
-        }
-        ctx.clearRect(0, 0, canvas.width, canvas.height)
-        // Redraw all completed strokes
-        for (const s of strokes.current) {
-          if (s.pts.length < 2) continue
-          ctx.save()
-          ctx.lineCap = 'round'; ctx.lineJoin = 'round'
-          if (s.eraser) {
-            ctx.globalCompositeOperation = 'destination-out'
-            ctx.strokeStyle = 'rgba(0,0,0,1)'
-            ctx.lineWidth = s.width * 4 * dpr
-          } else if (s.highlighter) {
-            ctx.globalCompositeOperation = 'source-over'
-            ctx.globalAlpha = 0.38
-            ctx.strokeStyle = s.color
-            ctx.lineWidth = s.width * 8 * dpr
-          } else {
-            ctx.globalCompositeOperation = 'source-over'
-            ctx.strokeStyle = s.color
-            ctx.lineWidth = s.width * dpr
-          }
-          ctx.beginPath()
-          ctx.moveTo(s.pts[0].x * dpr, s.pts[0].y * dpr)
-          for (const p of s.pts.slice(1)) ctx.lineTo(p.x * dpr, p.y * dpr)
-          ctx.stroke()
-          ctx.restore()
-        }
-        // Draw current in-progress stroke as a single complete path (no accumulation)
-        if (curPts.current.length >= 2) {
-          ctx.save()
-          ctx.globalCompositeOperation = 'source-over'
-          ctx.globalAlpha = 0.38
-          ctx.strokeStyle = colorRef.current
-          ctx.lineWidth = lineWidthRef.current * 8 * dpr
-          ctx.lineCap = 'round'; ctx.lineJoin = 'round'
-          ctx.beginPath()
-          ctx.moveTo(curPts.current[0].x * dpr, curPts.current[0].y * dpr)
-          for (const p of curPts.current.slice(1)) ctx.lineTo(p.x * dpr, p.y * dpr)
-          ctx.stroke()
-          ctx.restore()
-        }
-      } else {
-        // Pen / eraser: incremental drawing is fine (no alpha accumulation)
+      // Capture the last accumulated point before adding new ones (used by eraser).
+      const prevPt = curPts.current[curPts.current.length - 1]
+
+      for (const ev of evs) {
+        curPts.current.push({
+          x: (ev.clientX - r.left) / r.width,
+          y: (ev.clientY - r.top)  / r.height,
+        })
+      }
+
+      if (t === 'eraser') {
+        // Eraser: draw incrementally on the main canvas. destination-out compositing
+        // does not work on a transparent overlay because it would erase the overlay
+        // pixels (which are empty) rather than the completed-stroke pixels below.
+        if (!prevPt) return
+        const ctx = canvas.getContext('2d')!
         ctx.save()
         ctx.lineCap = 'round'
         ctx.lineJoin = 'round'
-        if (t === 'eraser') {
-          ctx.globalCompositeOperation = 'destination-out'
-          ctx.strokeStyle = 'rgba(0,0,0,1)'
-          ctx.lineWidth = lineWidthRef.current * 4 * dpr
-        } else {
-          ctx.globalCompositeOperation = 'source-over'
-          ctx.strokeStyle = colorRef.current
-          ctx.lineWidth = lineWidthRef.current * dpr
-        }
+        ctx.globalCompositeOperation = 'destination-out'
+        ctx.strokeStyle = 'rgba(0,0,0,1)'
+        ctx.lineWidth = lineWidthRef.current * 4 * dpr
         ctx.beginPath()
-        let drewAny = false
-        for (const ev of evs) {
-          const pt = {
-            x: (ev.clientX - r.left) / r.width  * canvas.width  / dpr,
-            y: (ev.clientY - r.top)  / r.height * canvas.height / dpr,
-          }
-          const prev = curPts.current[curPts.current.length - 1]
-          curPts.current.push(pt)
-          if (!prev) continue
-          if (!drewAny) { ctx.moveTo(prev.x * dpr, prev.y * dpr); drewAny = true }
-          ctx.lineTo(pt.x * dpr, pt.y * dpr)
+        ctx.moveTo(prevPt.x * canvas.width, prevPt.y * canvas.height)
+        for (const p of curPts.current.slice(curPts.current.length - evs.length)) {
+          ctx.lineTo(p.x * canvas.width, p.y * canvas.height)
         }
-        if (drewAny) ctx.stroke()
+        ctx.stroke()
         ctx.restore()
+      } else {
+        // Pen / highlighter: accumulate all points and redraw the ENTIRE current
+        // stroke on the overlay as one path. This eliminates both alpha-accumulation
+        // (highlighter) and per-segment round-cap artifacts (pen) that occur when
+        // strokes are drawn as incremental segments across multiple onMove events.
+        drawCurrentStroke()
       }
     }
 
@@ -310,26 +320,52 @@ export function MarkdownViewer({
           eraser: t === 'eraser',
           highlighter: t === 'highlighter',
         }]
+        if (t !== 'eraser') {
+          // Pen / highlighter: commit overlay to the main canvas, then clear overlay.
+          redrawRef.current()
+          clearOverlay()
+        }
+        // Eraser: already drawn incrementally on the main canvas; no redraw needed.
         saveStrokes()
         onCountRef.current?.(strokes.current.length)
+      } else {
+        // Stroke too short to save; clear any overlay remnant.
+        clearOverlay()
       }
       curPts.current = []
     }
 
-    // passive: false on pointerdown so e.preventDefault() suppresses browser scroll/cancel
-    canvas.addEventListener('pointerdown', onDown, { passive: false })
-    canvas.addEventListener('pointermove', onMove, { passive: false })
-    canvas.addEventListener('pointerup',   onUp)
-    canvas.addEventListener('pointercancel', onUp)
-    return () => {
-      canvas.removeEventListener('pointerdown', onDown)
-      canvas.removeEventListener('pointermove', onMove)
-      canvas.removeEventListener('pointerup',   onUp)
-      canvas.removeEventListener('pointercancel', onUp)
+    // pointercancel fires when the browser or OS aborts the pointer sequence
+    // (e.g. palm rejection, orientation change, system gesture). Discard the
+    // in-progress stroke rather than committing a garbled partial mark.
+    const onCancel = (e: PointerEvent) => {
+      if (e.pointerType !== 'pen') {
+        if (e.pointerType === 'touch') touchScrollStart.current = null
+        return
+      }
+      if (!drawing.current) return
+      drawing.current = false
+      clearOverlay()
+      if (toolRef.current === 'eraser') {
+        // Undo the incremental erasing drawn on the main canvas during this stroke.
+        redrawRef.current()
+      }
+      curPts.current = []
     }
-  }, []) // [] — only mutable refs used inside; no stale closure risk
 
-  // Expose undo/clear to the parent via handle ref
+    canvas.addEventListener('pointerdown',  onDown,    { passive: false })
+    canvas.addEventListener('pointermove',  onMove,    { passive: false })
+    canvas.addEventListener('pointerup',    onUp)
+    canvas.addEventListener('pointercancel', onCancel)
+    return () => {
+      canvas.removeEventListener('pointerdown',  onDown)
+      canvas.removeEventListener('pointermove',  onMove)
+      canvas.removeEventListener('pointerup',    onUp)
+      canvas.removeEventListener('pointercancel', onCancel)
+    }
+  }, []) // [] — only mutable refs used inside
+
+  // Expose undo/clear to the parent
   useEffect(() => {
     if (!markupHandleRef) return
     markupHandleRef.current = {
@@ -337,42 +373,51 @@ export function MarkdownViewer({
         if (!strokes.current.length) return
         strokes.current = strokes.current.slice(0, -1)
         redraw()
-        localStorage.setItem(`md_markup_${fileIdRef.current}`, JSON.stringify(strokes.current))
+        localStorage.setItem(STORAGE_KEY(fileIdRef.current), JSON.stringify(strokes.current))
         onCountRef.current?.(strokes.current.length)
       },
       clear: () => {
         strokes.current = []
         redraw()
-        localStorage.setItem(`md_markup_${fileIdRef.current}`, JSON.stringify(strokes.current))
+        localStorage.setItem(STORAGE_KEY(fileIdRef.current), JSON.stringify(strokes.current))
         onCountRef.current?.(0)
       },
     }
   }, [markupHandleRef, redraw])
 
-  // NOTE: The canvas is rendered unconditionally so it is always in the DOM.
-  // This ensures the useEffect([]) above can attach listeners on mount.
-  // Loading / error states are shown INSIDE the same wrapper div.
+  const canvasStyle: React.CSSProperties = {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    // touch-action:none prevents the browser from firing pointercancel
+    // mid-stroke when it tries to start a pan gesture (even for pen pointers).
+    touchAction: 'none',
+    zIndex: 10,
+    opacity: showMarkup ? 1 : 0,
+  }
+
   return (
     <div
       ref={contentDivRef}
       className="markdown-viewer"
       style={{ position: 'relative', fontSize: `${14 * fontScale}px` }}
     >
-      {/* Canvas is always present — covers the full content area.
-          touch-action:none prevents the browser from stealing pen pointer events
-          (with pan-y the browser fires pointercancel mid-stroke). Finger scroll
-          is handled manually via the touchScrollStart relay above. */}
+      {/* Main canvas — completed strokes; receives pointer events */}
       <canvas
         ref={canvasRef}
         style={{
-          position: 'absolute',
-          top: 0,
-          left: 0,
-          touchAction: 'none',
+          ...canvasStyle,
           pointerEvents: markupEnabled ? 'auto' : 'none',
-          zIndex: 10,
-          opacity: showMarkup ? 1 : 0,
           cursor: markupEnabled ? (tool === 'eraser' ? 'cell' : 'crosshair') : 'default',
+        }}
+      />
+      {/* Overlay canvas — in-progress highlighter stroke; never receives events */}
+      <canvas
+        ref={overlayRef}
+        style={{
+          ...canvasStyle,
+          zIndex: 11,
+          pointerEvents: 'none',
         }}
       />
 

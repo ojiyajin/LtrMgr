@@ -187,30 +187,30 @@ export function PdfMarkupPage() {
 
     const onDown = (e: PointerEvent) => {
       if (e.pointerType === 'touch') {
-        if (isInDeadZone(e.clientX, e.clientY, deadZoneRef.current, toolbarHRef.current)) {
-          // Capture the dead-zone touch to the canvas so the OS knows it is handled here
-          // and does not enter a multi-pointer gesture state that would block Apple Pencil events.
-          // NOTE: do NOT call e.preventDefault() here — on some iOS versions pointerdown.preventDefault()
-          // suppresses the subsequent touchstart event, which means our touchstart handler (the one
-          // that reliably stops native scroll gestures) never fires. We rely on touchstart instead.
-          deadZonePointerIds.current.add(e.pointerId)
-          try { el.setPointerCapture(e.pointerId) } catch (_) { /* may fail if pointer already captured */ }
+        const isStylus = (e as any).touchType === 'stylus'
+        if (!isStylus) {
+          // Finger touch: check dead zone and handle scroll tracking
+          if (isInDeadZone(e.clientX, e.clientY, deadZoneRef.current, toolbarHRef.current)) {
+            deadZonePointerIds.current.add(e.pointerId)
+            try { el.setPointerCapture(e.pointerId) } catch (_) {}
+            return
+          }
+          activeTouchCount.current++
+          if (activeTouchCount.current === 1 && !drawing.current && scrollContainerRef.current)
+            touchScrollStart.current = {
+              x: e.clientX, y: e.clientY,
+              scrollLeft: scrollContainerRef.current.scrollLeft,
+              scrollTop: scrollContainerRef.current.scrollTop,
+            }
+          else
+            touchScrollStart.current = null
           return
         }
-        activeTouchCount.current++
-        // Only track single-finger scroll; cancel it when a second finger lands (pinch)
-        if (activeTouchCount.current === 1 && !drawing.current && scrollContainerRef.current)
-          touchScrollStart.current = {
-            x: e.clientX, y: e.clientY,
-            scrollLeft: scrollContainerRef.current.scrollLeft,
-            scrollTop: scrollContainerRef.current.scrollTop,
-          }
-        else
-          touchScrollStart.current = null
-        return
+        // Apple Pencil on older iOS (touchType='stylus'): fall through to drawing logic below
       }
-      // Pen / mouse: dead zone blocks drawing
-      if (isInDeadZone(e.clientX, e.clientY, deadZoneRef.current, toolbarHRef.current)) return
+      // Pen (pointerType='pen', modern iPadOS Apple Pencil), older iOS stylus, or Mouse.
+      // Dead zone only applies to mouse — Apple Pencil always draws regardless of position.
+      if (e.pointerType === 'mouse' && isInDeadZone(e.clientX, e.clientY, deadZoneRef.current, toolbarHRef.current)) return
       e.preventDefault()
       el.setPointerCapture(e.pointerId)
       // Lock scroll container to prevent palm touch from scrolling during pen stroke
@@ -232,13 +232,16 @@ export function PdfMarkupPage() {
 
     const onMove = (e: PointerEvent) => {
       if (e.pointerType === 'touch') {
-        if (deadZonePointerIds.current.has(e.pointerId)) return
-        // Single-finger scroll only; skip when pinching (2+ touches)
-        if (activeTouchCount.current === 1 && !drawing.current && touchScrollStart.current && scrollContainerRef.current) {
-          scrollContainerRef.current.scrollTop  = touchScrollStart.current.scrollTop  + (touchScrollStart.current.y - e.clientY)
-          scrollContainerRef.current.scrollLeft = touchScrollStart.current.scrollLeft + (touchScrollStart.current.x - e.clientX)
+        const isStylus = (e as any).touchType === 'stylus'
+        if (!isStylus) {
+          if (deadZonePointerIds.current.has(e.pointerId)) return
+          if (activeTouchCount.current === 1 && !drawing.current && touchScrollStart.current && scrollContainerRef.current) {
+            scrollContainerRef.current.scrollTop  = touchScrollStart.current.scrollTop  + (touchScrollStart.current.y - e.clientY)
+            scrollContainerRef.current.scrollLeft = touchScrollStart.current.scrollLeft + (touchScrollStart.current.x - e.clientX)
+          }
+          return
         }
-        return
+        // Apple Pencil on older iOS: fall through to drawing logic
       }
       if (!drawing.current || activePage.current !== pageNum) return
       e.preventDefault()
@@ -285,13 +288,17 @@ export function PdfMarkupPage() {
 
     const onUp = (e: PointerEvent) => {
       if (e.pointerType === 'touch') {
-        if (deadZonePointerIds.current.has(e.pointerId)) {
-          deadZonePointerIds.current.delete(e.pointerId)
+        const isStylus = (e as any).touchType === 'stylus'
+        if (!isStylus) {
+          if (deadZonePointerIds.current.has(e.pointerId)) {
+            deadZonePointerIds.current.delete(e.pointerId)
+            return
+          }
+          activeTouchCount.current = Math.max(0, activeTouchCount.current - 1)
+          touchScrollStart.current = null
           return
         }
-        activeTouchCount.current = Math.max(0, activeTouchCount.current - 1)
-        touchScrollStart.current = null
-        return
+        // Apple Pencil on older iOS: fall through to stroke-end logic
       }
       if (!drawing.current) return
       drawing.current = false
@@ -396,17 +403,15 @@ export function PdfMarkupPage() {
         if (!currentIds.has(id)) deadZoneTouchIds.current.delete(id)
       }
       for (const t of Array.from(e.touches)) {
+        if ((t as any).touchType === 'stylus') continue  // Apple Pencil on older iOS never enters dead zone
         if (isInDeadZone(t.clientX, t.clientY, deadZoneRef.current, toolbarHRef.current))
           deadZoneTouchIds.current.add(t.identifier)
       }
 
-      // If any NEW touch landed in the dead zone, call preventDefault() immediately.
-      // This is the only reliable way to stop iOS from starting a native scroll/gesture
-      // session: once iOS claims the touch sequence natively, it blocks BOTH Apple Pencil
-      // events and button taps for the duration. touchAction:'none' (CSS) alone is not
-      // consistently respected by iOS Safari on overflow:auto containers.
-      // This listener must be non-passive (see registration below) for this to take effect.
+      // If any NEW finger touch (not stylus) landed in the dead zone, preventDefault() to stop
+      // iOS from starting a native scroll/gesture session that would block Apple Pencil events.
       if (Array.from(e.changedTouches).some(t =>
+        (t as any).touchType !== 'stylus' &&
         isInDeadZone(t.clientX, t.clientY, deadZoneRef.current, toolbarHRef.current)
       )) {
         e.preventDefault()

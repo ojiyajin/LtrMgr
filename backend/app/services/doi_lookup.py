@@ -194,3 +194,34 @@ async def lookup_doi(query: str) -> Optional[DOILookupResult]:
         return await _lookup_arxiv(arxiv_id)
 
     return None
+
+
+async def resolve_pdf_url(doi: str) -> Optional[str]:
+    """Resolve a DOI to a direct PDF URL.
+
+    Resolution order:
+    1. arXiv DOI → construct direct PDF URL (fast, reliable)
+    2. Content-negotiation via doi.org with Accept: application/pdf
+    3. Unpaywall open-access lookup (fallback)
+    """
+    # arXiv papers: construct the PDF URL directly without an HTTP round-trip
+    arxiv_m = _ARXIV_DOI_RE.match(doi.strip())
+    if arxiv_m:
+        return f"https://arxiv.org/pdf/{arxiv_m.group(1)}"
+
+    # Content-negotiation: ask doi.org to redirect to a PDF
+    headers = {
+        "Accept": "application/pdf",
+        "User-Agent": "Mozilla/5.0 (compatible; LtrMgr/1.0)",
+    }
+    async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+        try:
+            r = await client.get(f"https://doi.org/{doi}", headers=headers)
+            ct = r.headers.get("content-type", "").lower()
+            if "pdf" in ct or r.url.path.lower().endswith(".pdf"):
+                return str(r.url)
+        except Exception:
+            pass
+
+    # Fallback: Unpaywall open-access database
+    return await fetch_pdf_url_from_doi(doi)

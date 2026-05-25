@@ -1863,7 +1863,7 @@ a { color: var(--blue); text-decoration: none; }
 }
 .markdown-viewer table { border-collapse: collapse; width: 100%; margin: 0.8em 0; }
 .markdown-viewer th,
-.markdown-viewer td { border: 1px solid var(--border); padding: 6px 12px; font-size: 13px; }
+.markdown-viewer td { border: 1px solid var(--border); padding: 6px 12px; font-size: 0.929em; }
 .markdown-viewer th { background: var(--surface); font-weight: 700; }
 .markdown-viewer a { color: var(--accent); text-decoration: underline; }
 

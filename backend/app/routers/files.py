@@ -14,7 +14,7 @@ from app.models import User, Document, PDFFile, Citation, AppSetting
 from app.schemas import PDFFileOut, PDFUploadResult, MarkdownContentUpdate, RenameFileBody
 from app.auth import get_current_user
 from app.services.pdf_parser import extract_text, extract_doi
-from app.services.doi_lookup import lookup_doi, fetch_pdf_url_from_doi
+from app.services.doi_lookup import lookup_doi, fetch_pdf_url_from_doi, resolve_pdf_url
 
 router = APIRouter(prefix="/api/documents/{doc_id}/files", tags=["files"])
 
@@ -173,9 +173,9 @@ async def fetch_pdf_from_doi(
     if not cit or not cit.doi:
         raise HTTPException(status_code=400, detail="この文献にはDOIが設定されていません")
 
-    pdf_url = await fetch_pdf_url_from_doi(cit.doi)
+    pdf_url = await resolve_pdf_url(cit.doi)
     if not pdf_url:
-        raise HTTPException(status_code=404, detail="オープンアクセスのPDFが見つかりませんでした")
+        raise HTTPException(status_code=404, detail="PDFが見つかりませんでした（オープンアクセスでない可能性があります）")
 
     rename_tpl = await _get_setting(db, "pdf_rename_template")
     save_dir = await _get_setting(db, "pdf_save_dir")
@@ -201,7 +201,11 @@ async def fetch_pdf_from_doi(
             if r.status_code != 200:
                 raise HTTPException(status_code=502, detail=f"PDFのダウンロードに失敗しました (HTTP {r.status_code})")
             ct = r.headers.get("content-type", "")
-            if not ("pdf" in ct.lower() or "octet-stream" in ct.lower() or pdf_url.endswith(".pdf") or "/pdf" in pdf_url):
+            final_url = str(r.url)
+            is_pdf = ("pdf" in ct.lower() or "octet-stream" in ct.lower()
+                      or final_url.endswith(".pdf") or "/pdf" in final_url
+                      or pdf_url.endswith(".pdf") or "/pdf" in pdf_url)
+            if not is_pdf:
                 raise HTTPException(status_code=502, detail="取得したファイルがPDFではありませんでした")
             with open(dest, "wb") as f:
                 f.write(r.content)

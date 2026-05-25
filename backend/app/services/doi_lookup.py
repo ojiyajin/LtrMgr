@@ -31,12 +31,16 @@ class _TagStripper(HTMLParser):
 
 
 def _extract_arxiv_id(text: str) -> Optional[str]:
-    m = _ARXIV_DOI_RE.match(text.strip())
+    # Use .search() so a DOI embedded in a sentence (e.g. "DOI: 10.48550/…")
+    # is matched even when it is not at the very start of the string.
+    m = _ARXIV_DOI_RE.search(text.strip())
     if m:
         return m.group(1)
     m = _ARXIV_ID_RE.search(text.strip())
     if m:
-        return m.group(1)
+        # Strip version suffix (e.g. "2301.00001v2" → "2301.00001") so that
+        # generated DOIs and API queries use the canonical unversioned ID.
+        return re.sub(r'v\d+$', '', m.group(1))
     return None
 
 
@@ -146,15 +150,20 @@ async def _lookup_arxiv(arxiv_id: str) -> Optional[DOILookupResult]:
 
 async def fetch_pdf_url_from_doi(doi: str) -> Optional[str]:
     """Use Unpaywall API to find a legal open-access PDF URL for the given DOI."""
+    import logging
     from app.config import settings
+    if not settings.crossref_email:
+        logging.warning("crossref_email is not configured; Unpaywall API requires a valid email")
     url = f"https://api.unpaywall.org/v2/{doi}?email={settings.crossref_email}"
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.get(url)
             if r.status_code != 200:
+                logging.warning("Unpaywall returned HTTP %d for DOI %s", r.status_code, doi)
                 return None
             data = r.json()
-    except Exception:
+    except Exception as exc:
+        logging.warning("Unpaywall request failed for DOI %s: %s", doi, exc)
         return None
 
     best = data.get("best_oa_location") or {}
@@ -176,20 +185,27 @@ async def lookup_doi(query: str) -> Optional[DOILookupResult]:
     # Detect arXiv input
     arxiv_id = _extract_arxiv_id(query)
 
-    # If it looks purely like an arXiv ID (not a full DOI), go to arXiv API directly
+    # Pure arXiv ID / URL (not a DOI string) → arXiv API directly
     if arxiv_id and not query.startswith("10."):
         result = await _lookup_arxiv(arxiv_id)
         if result:
             return result
 
-    # Try CrossRef for standard DOIs and arXiv DOIs
+    # arXiv DOI (10.48550/arXiv.*) → prefer arXiv API because it returns
+    # richer metadata (abstract, exact author list) than CrossRef for preprints.
+    if arxiv_id and query.upper().startswith("10.48550/"):
+        result = await _lookup_arxiv(arxiv_id)
+        if result:
+            return result
+
+    # Standard / non-arXiv DOI → CrossRef
     doi = query if query.startswith("10.") else (f"10.48550/arXiv.{arxiv_id}" if arxiv_id else None)
     if doi:
         result = await _lookup_crossref(doi)
         if result:
             return result
 
-    # Fallback: arXiv API for arXiv DOIs
+    # Last-resort fallback: arXiv API (handles arXiv DOIs CrossRef missed)
     if arxiv_id:
         return await _lookup_arxiv(arxiv_id)
 

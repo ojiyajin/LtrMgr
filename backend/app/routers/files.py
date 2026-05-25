@@ -202,9 +202,15 @@ async def fetch_pdf_from_doi(
                 raise HTTPException(status_code=502, detail=f"PDFのダウンロードに失敗しました (HTTP {r.status_code})")
             ct = r.headers.get("content-type", "")
             final_url = str(r.url)
-            is_pdf = ("pdf" in ct.lower() or "octet-stream" in ct.lower()
-                      or final_url.endswith(".pdf") or "/pdf" in final_url
-                      or pdf_url.endswith(".pdf") or "/pdf" in pdf_url)
+            # Primary check: actual PDF magic bytes (%PDF-) in the response body.
+            # URL/Content-Type heuristics are kept as secondary signals but the
+            # magic-byte check overrides a false-negative from those heuristics.
+            has_magic = r.content[:5] == b'%PDF-'
+            is_pdf = has_magic or (
+                "pdf" in ct.lower() or "octet-stream" in ct.lower()
+                or final_url.endswith(".pdf") or "/pdf" in final_url
+                or pdf_url.endswith(".pdf") or "/pdf" in pdf_url
+            )
             if not is_pdf:
                 raise HTTPException(status_code=502, detail="取得したファイルがPDFではありませんでした")
             with open(dest, "wb") as f:

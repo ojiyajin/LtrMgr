@@ -218,14 +218,20 @@ async def resolve_pdf_url(doi: str) -> Optional[str]:
     Resolution order:
     1. arXiv DOI → construct direct PDF URL (fast, reliable)
     2. Content-negotiation via doi.org with Accept: application/pdf
+       (magic-byte check takes priority over Content-Type header)
     3. Unpaywall open-access lookup (fallback)
     """
-    # arXiv papers: construct the PDF URL directly without an HTTP round-trip
-    arxiv_m = _ARXIV_DOI_RE.match(doi.strip())
-    if arxiv_m:
-        return f"https://arxiv.org/pdf/{arxiv_m.group(1)}"
+    doi = doi.strip()
 
-    # Content-negotiation: ask doi.org to redirect to a PDF
+    # arXiv papers: construct the PDF URL directly without an HTTP round-trip.
+    # Use .search() so the regex matches even when the DOI is embedded in text.
+    # Append .pdf because arxiv.org stopped serving PDF without the extension.
+    arxiv_m = _ARXIV_DOI_RE.search(doi)
+    if arxiv_m:
+        arxiv_id = arxiv_m.group(1)
+        return f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+
+    # Content-negotiation: ask doi.org to redirect to a PDF.
     headers = {
         "Accept": "application/pdf",
         "User-Agent": "Mozilla/5.0 (compatible; LtrMgr/1.0)",
@@ -233,8 +239,12 @@ async def resolve_pdf_url(doi: str) -> Optional[str]:
     async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
         try:
             r = await client.get(f"https://doi.org/{doi}", headers=headers)
+            # Magic-byte check is the most reliable signal — takes priority.
+            if r.content[:5] == b'%PDF-':
+                return str(r.url)
             ct = r.headers.get("content-type", "").lower()
-            if "pdf" in ct or r.url.path.lower().endswith(".pdf"):
+            # Accept PDF content-type only when it is not an HTML wrapper page.
+            if "pdf" in ct and "html" not in ct:
                 return str(r.url)
         except Exception:
             pass

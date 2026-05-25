@@ -261,8 +261,9 @@ export function MarkdownViewer({
       if (!drawing.current) return
       e.preventDefault()
       const evs = typeof e.getCoalescedEvents === 'function' ? e.getCoalescedEvents() : [e]
-      const r = canvasRectRef.current
-      if (!r) return
+      // Re-fetch every move: canvas position in viewport changes when the scroll
+      // container scrolls or the device rotates, so a cached onDown rect drifts.
+      const r = canvas.getBoundingClientRect()
       const dpr = window.devicePixelRatio || 1
       const t = toolRef.current
 
@@ -336,8 +337,10 @@ export function MarkdownViewer({
     }
 
     // pointercancel fires when the browser or OS aborts the pointer sequence
-    // (e.g. palm rejection, orientation change, system gesture). Discard the
-    // in-progress stroke rather than committing a garbled partial mark.
+    // (e.g. palm rejection, orientation change, system gesture).
+    // If the stroke accumulated enough points (≥5) it's likely intentional —
+    // save it so the user doesn't lose visible work. Shorter fragments are
+    // discarded as accidental touches.
     const onCancel = (e: PointerEvent) => {
       if (e.pointerType !== 'pen') {
         if (e.pointerType === 'touch') touchScrollStart.current = null
@@ -345,9 +348,22 @@ export function MarkdownViewer({
       }
       if (!drawing.current) return
       drawing.current = false
+      const t = toolRef.current
+      if (curPts.current.length >= 5 && t !== 'eraser') {
+        strokes.current = [...strokes.current, {
+          pts: [...curPts.current],
+          color: colorRef.current,
+          width: lineWidthRef.current,
+          eraser: false,
+          highlighter: t === 'highlighter',
+        }]
+        redrawRef.current()
+        saveStrokes()
+        onCountRef.current?.(strokes.current.length)
+      }
       clearOverlay()
-      if (toolRef.current === 'eraser') {
-        // Undo the incremental erasing drawn on the main canvas during this stroke.
+      if (t === 'eraser') {
+        // Undo any incremental erasing applied during this cancelled stroke.
         redrawRef.current()
       }
       curPts.current = []

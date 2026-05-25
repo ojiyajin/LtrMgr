@@ -195,13 +195,13 @@ async def fetch_pdf_from_doi(
     dest = _resolve_path(pdf_file.id, final_name, save_dir, is_md=False)
 
     try:
-        headers = {"User-Agent": f"LtrMgr/1.0 (mailto:{settings.crossref_email})"}
+        headers = {"User-Agent": f"LtrMgr/1.0 (mailto:{settings.crossref_email})", "Accept": "application/pdf,application/octet-stream;q=0.9,*/*;q=0.5", "Referer": "https://doi.org/"}
         async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
             r = await client.get(pdf_url, headers=headers)
             if r.status_code != 200:
                 raise HTTPException(status_code=502, detail=f"PDFのダウンロードに失敗しました (HTTP {r.status_code})")
             ct = r.headers.get("content-type", "")
-            if "pdf" not in ct.lower() and "octet-stream" not in ct.lower():
+            if not ("pdf" in ct.lower() or "octet-stream" in ct.lower() or pdf_url.endswith(".pdf") or "/pdf" in pdf_url):
                 raise HTTPException(status_code=502, detail="取得したファイルがPDFではありませんでした")
             with open(dest, "wb") as f:
                 f.write(r.content)

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import 'katex/dist/katex.min.css'
@@ -446,7 +447,7 @@ export function MarkdownViewer({
         : content === null
           ? <p style={{ color: 'var(--text-dim)', fontSize: 13 }}>読み込み中...</p>
           : <ReactMarkdown
-              remarkPlugins={[remarkMath]}
+              remarkPlugins={[remarkGfm, remarkMath]}
               rehypePlugins={[[rehypeKatex, { throwOnError: false }]]}
             >
               {rawMath ? content : preprocessMath(content)}

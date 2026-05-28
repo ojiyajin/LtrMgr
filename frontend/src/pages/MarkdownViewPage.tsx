@@ -35,6 +35,7 @@ export function MarkdownViewPage() {
   const [deadZoneCfg, setDeadZoneCfg] = useState<DeadZoneConfig>(() => loadDeadZone())
   const deadZoneRef = useRef<DeadZoneConfig>(deadZoneCfg)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
+  const contentWrapRef = useRef<HTMLDivElement>(null)
   const [fontSize, setFontSize] = useState<FontSizeKey>('medium')
   const [editMode, setEditMode] = useState(false)
   const [editText, setEditText] = useState('')
@@ -45,6 +46,81 @@ export function MarkdownViewPage() {
   const toolbarHRef = useRef(0)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const pendingAnchorRef = useRef<Anchor | null>(null)
+
+  // ── Math rendering mode ────────────────────────────────────────────────────
+  const [rawMath, setRawMath] = useState(false)
+  const [rawMathUserOverride, setRawMathUserOverride] = useState(false)
+
+  // ── Bookmark (しおり) ───────────────────────────────────────────────────────
+  const BOOKMARK_KEY = fileId ? `md_bookmark_${fileId}` : null
+  const [bookmark, setBookmark] = useState<Anchor | null>(() => {
+    if (!fileId) return null
+    try { const s = localStorage.getItem(`md_bookmark_${fileId}`); return s ? JSON.parse(s) : null }
+    catch { return null }
+  })
+  const bookmarkRestoredRef = useRef(false)
+
+  function saveBookmark() {
+    if (!BOOKMARK_KEY) return
+    const anchor = captureViewerAnchor()
+    localStorage.setItem(BOOKMARK_KEY, JSON.stringify(anchor))
+    setBookmark(anchor)
+  }
+  function clearBookmark() {
+    if (!BOOKMARK_KEY) return
+    localStorage.removeItem(BOOKMARK_KEY)
+    setBookmark(null)
+    bookmarkRestoredRef.current = false
+  }
+  function jumpToBookmark() {
+    if (bookmark) applyViewerAnchor(bookmark)
+  }
+
+  // ── Scroll progress (for custom scrollbar) ─────────────────────────────────
+  const [scrollInfo, setScrollInfo] = useState({ pct: 0, ratio: 1 })
+
+  function updateScrollInfo() {
+    const el = scrollContainerRef.current
+    if (!el) return
+    const max = el.scrollHeight - el.clientHeight
+    setScrollInfo({
+      pct: max > 0 ? el.scrollTop / max : 0,
+      ratio: el.scrollHeight > 0 ? el.clientHeight / el.scrollHeight : 1,
+    })
+  }
+
+  useEffect(() => {
+    if (editMode) return
+    const el = scrollContainerRef.current
+    if (!el) return
+    el.addEventListener('scroll', updateScrollInfo, { passive: true })
+    const ro = new ResizeObserver(updateScrollInfo)
+    // Observe the inner content div: its height grows as content/KaTeX renders,
+    // whereas the scroll container's own box dimensions stay fixed (flex:1).
+    if (contentWrapRef.current) ro.observe(contentWrapRef.current)
+    updateScrollInfo()
+    return () => { el.removeEventListener('scroll', updateScrollInfo); ro.disconnect() }
+  }, [editMode]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  function handleScrollbarClick(e: React.MouseEvent<HTMLDivElement>) {
+    const el = scrollContainerRef.current
+    if (!el) return
+    const rect = e.currentTarget.getBoundingClientRect()
+    const frac = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height))
+    el.scrollTop = frac * (el.scrollHeight - el.clientHeight)
+  }
+
+  const handleContentLoaded = (text: string) => {
+    if (!rawMathUserOverride) {
+      setRawMath(/\$\$[\s\S]+?\$\$|\$[^$\n]+?\$/.test(text))
+    }
+    if (!bookmarkRestoredRef.current && bookmark) {
+      bookmarkRestoredRef.current = true
+      applyViewerAnchor(bookmark)
+    }
+    // Trigger scrollbar update after React renders content and after KaTeX finishes
+    requestAnimationFrame(() => { updateScrollInfo(); requestAnimationFrame(updateScrollInfo) })
+  }
 
   // ── Markup state ───────────────────────────────────────────────────────────
   const [markupEnabled, setMarkupEnabled] = useState(false)
@@ -157,6 +233,7 @@ export function MarkdownViewPage() {
       await updateFileContent(id!, fileId!, editText)
       await qc.invalidateQueries({ queryKey: ['document', id] })
       setEditMode(false)
+      setRawMathUserOverride(false)
       setViewerKey(k => k + 1)
     } catch {
       alert('保存に失敗しました')
@@ -360,16 +437,78 @@ export function MarkdownViewPage() {
           )}
           {!editMode && (
             <button
-              onClick={() => setMarkupEnabled(s => !s)}
+              onClick={() => { setRawMath(s => !s); setRawMathUserOverride(true) }}
+              title={rawMath ? '$区切りモード: ファイル内の $ / $$ をそのまま使用' : '自動$$挿入モード: LaTeXコマンドに $$ を自動補完'}
               style={{
                 padding: '5px 12px', borderRadius: 6, border: 'none', cursor: 'pointer',
                 fontSize: 12, fontWeight: 600,
-                background: markupEnabled ? '#f59e0b' : 'transparent',
-                color: markupEnabled ? '#0c0e12' : '#94a3b8',
+                background: rawMath ? '#0ea5e9' : 'transparent',
+                color: rawMath ? '#fff' : '#94a3b8',
               }}
             >
-              マーカー{markupStrokeCount > 0 ? ` (${markupStrokeCount})` : ''}
+              {rawMath ? '$区切り' : '自動$$'}
             </button>
+          )}
+          {!editMode && (
+            <>
+              {/* Bookmark buttons */}
+              {bookmark ? (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                  <button
+                    onClick={jumpToBookmark}
+                    title="しおりの位置へ移動"
+                    style={{
+                      padding: '5px 10px', borderRadius: '6px 0 0 6px', border: 'none', cursor: 'pointer',
+                      fontSize: 12, fontWeight: 600, background: '#0d9488', color: '#fff',
+                    }}
+                  >
+                    🔖 しおりへ
+                  </button>
+                  <button
+                    onClick={saveBookmark}
+                    title="現在位置でしおりを上書き"
+                    style={{
+                      padding: '5px 6px', border: 'none', cursor: 'pointer',
+                      fontSize: 11, fontWeight: 600, background: '#0f766e', color: '#99f6e4',
+                    }}
+                  >
+                    更新
+                  </button>
+                  <button
+                    onClick={clearBookmark}
+                    title="しおりを解除"
+                    style={{
+                      padding: '5px 6px', borderRadius: '0 6px 6px 0', border: 'none', cursor: 'pointer',
+                      fontSize: 11, background: '#134e4a', color: '#5eead4',
+                    }}
+                  >
+                    ×
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={saveBookmark}
+                  title="現在位置にしおりを挟む"
+                  style={{
+                    padding: '5px 12px', borderRadius: 6, border: 'none', cursor: 'pointer',
+                    fontSize: 12, fontWeight: 600, background: 'transparent', color: '#94a3b8',
+                  }}
+                >
+                  🔖 しおり
+                </button>
+              )}
+              <button
+                onClick={() => setMarkupEnabled(s => !s)}
+                style={{
+                  padding: '5px 12px', borderRadius: 6, border: 'none', cursor: 'pointer',
+                  fontSize: 12, fontWeight: 600,
+                  background: markupEnabled ? '#f59e0b' : 'transparent',
+                  color: markupEnabled ? '#0c0e12' : '#94a3b8',
+                }}
+              >
+                マーカー{markupStrokeCount > 0 ? ` (${markupStrokeCount})` : ''}
+              </button>
+            </>
           )}
           <button
             onClick={() => setShowNotes(s => !s)}
@@ -480,23 +619,52 @@ export function MarkdownViewPage() {
           />
         </div>
       ) : (
-        <div ref={scrollContainerRef} style={{ flex: 1, overflowY: 'auto', background: '#fff', userSelect: 'text', WebkitUserSelect: 'text' }}>
-          <div style={{ maxWidth: 820, margin: '0 auto', padding: '40px 32px 80px' }}>
-            <MarkdownViewer
-              key={viewerKey}
-              docId={id!}
-              fileId={fileId!}
-              fontScale={currentZoom}
-              markupEnabled={markupEnabled}
-              tool={markupTool}
-              color={markupColor}
-              lineWidth={markupWidth}
-              showMarkup={showMarkupCanvas}
-              onStrokeCountChange={setMarkupStrokeCount}
-              markupHandleRef={markupHandleRef}
-              scrollRef={scrollContainerRef}
-            />
+        <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+          <div ref={scrollContainerRef} style={{ flex: 1, overflowY: 'auto', background: '#fff', userSelect: 'text', WebkitUserSelect: 'text' }}>
+            <div ref={contentWrapRef} style={{ maxWidth: 820, margin: '0 auto', padding: '40px 32px 80px' }}>
+              <MarkdownViewer
+                key={viewerKey}
+                docId={id!}
+                fileId={fileId!}
+                fontScale={currentZoom}
+                rawMath={rawMath}
+                markupEnabled={markupEnabled}
+                tool={markupTool}
+                color={markupColor}
+                lineWidth={markupWidth}
+                showMarkup={showMarkupCanvas}
+                onStrokeCountChange={setMarkupStrokeCount}
+                markupHandleRef={markupHandleRef}
+                scrollRef={scrollContainerRef}
+                onContentLoaded={handleContentLoaded}
+              />
+            </div>
           </div>
+          {/* Custom scrollbar — always visible, shows reading position */}
+          {(() => {
+            const thumbH = Math.max(scrollInfo.ratio * 100, 5)
+            const thumbTop = scrollInfo.pct * (100 - thumbH)
+            return (
+              <div
+                onClick={handleScrollbarClick}
+                style={{
+                  width: 10, flexShrink: 0, background: '#e2e8f0',
+                  cursor: 'pointer', position: 'relative', userSelect: 'none',
+                  borderLeft: '1px solid #cbd5e1',
+                }}
+              >
+                <div style={{
+                  position: 'absolute',
+                  top: `${thumbTop}%`,
+                  height: `${thumbH}%`,
+                  width: '100%',
+                  background: '#94a3b8',
+                  borderRadius: 3,
+                  transition: 'top 80ms linear',
+                }} />
+              </div>
+            )
+          })()}
         </div>
       )}
 

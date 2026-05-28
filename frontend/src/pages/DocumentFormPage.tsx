@@ -187,7 +187,7 @@ export function DocumentFormPage() {
   }
 
   return (
-    <Layout>
+    <Layout hideFabs>
       <div style={{ flex: 1, overflowY: 'auto' }}>
         <div style={{ maxWidth: 760, margin: '0 auto', padding: '32px 28px' }}>
           {/* Page header */}

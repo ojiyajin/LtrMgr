@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useConferenceMode } from '../store/conferenceMode'
 import { SettingsModal } from './SettingsModal'
 
-export function Layout({ children }: { children: React.ReactNode }) {
+export function Layout({ children, hideFabs = false }: { children: React.ReactNode; hideFabs?: boolean }) {
   const navigate = useNavigate()
   const cm = useConferenceMode()
 
@@ -30,33 +30,37 @@ export function Layout({ children }: { children: React.ReactNode }) {
     <div className="app-layout">
 
       {/* ── Hamburger FAB ── */}
-      <button
-        className={`fab-menu${menuOpen ? ' active' : ''}`}
-        onClick={() => setMenuOpen((o) => !o)}
-        aria-label={menuOpen ? 'メニューを閉じる' : 'メニューを開く'}
-      >
-        <span className={`hamburger-icon${menuOpen ? ' open' : ''}`}>
-          <span /><span /><span />
-        </span>
-      </button>
+      {!hideFabs && (
+        <button
+          className={`fab-menu${menuOpen ? ' active' : ''}`}
+          onClick={() => setMenuOpen((o) => !o)}
+          aria-label={menuOpen ? 'メニューを閉じる' : 'メニューを開く'}
+        >
+          <span className={`hamburger-icon${menuOpen ? ' open' : ''}`}>
+            <span /><span /><span />
+          </span>
+        </button>
+      )}
 
       {/* ── Add document FAB ── */}
-      <button
-        className="fab-add"
-        onClick={() => { navigate('/documents/new'); closeMenu() }}
-        title="文献を追加"
-        aria-label="文献を追加"
-      >
-        ＋
-      </button>
+      {!hideFabs && (
+        <button
+          className="fab-add"
+          onClick={() => { navigate('/documents/new'); closeMenu() }}
+          title="文献を追加"
+          aria-label="文献を追加"
+        >
+          ＋
+        </button>
+      )}
 
       {/* ── Menu popup overlay (transparent, closes on click outside) ── */}
-      {menuOpen && (
+      {!hideFabs && menuOpen && (
         <div className="fab-popup-overlay" onClick={closeMenu} />
       )}
 
       {/* ── Menu popup above the hamburger FAB ── */}
-      {menuOpen && (
+      {!hideFabs && menuOpen && (
         <div className="fab-popup-menu">
           {/* Conference mode section */}
           <div className="fab-popup-conf">

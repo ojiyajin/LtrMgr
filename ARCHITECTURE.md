@@ -83,11 +83,11 @@ frontend/src/
 ├── utils/
 │   └── mathPreprocess.ts ← delimiterなしの生LaTeX命令に $...$ / $$...$$ を補完する前処理
 ├── components/
-│   ├── Layout.tsx             ← ナビゲーション付きページラッパー
+│   ├── Layout.tsx             ← ナビゲーション付きページラッパー。hideFabsプロップで＋ボタン・ハンバーガーを非表示化
 │   ├── DocumentCard.tsx       ← 文献一覧の1カード。ReadStatus切替ボタン・要旨モーダル・PDF/MDリンク
 │   ├── DocumentDetailContent.tsx ← 文献詳細UI本体（DocumentDetailPageとDocumentDetailModalで共用）
 │   ├── DocumentDetailModal.tsx   ← 一覧ページからモーダルで文献詳細を表示するラッパー
-│   ├── MarkdownViewer.tsx     ← .mdファイルをインラインで表示。KaTeX auto-renderで数式レンダリング
+│   ├── MarkdownViewer.tsx     ← .mdファイルをインラインで表示。KaTeX auto-renderで数式レンダリング。rawMath/onContentLoadedプロップ対応
 │   ├── PdfMarkupViewer.tsx    ← PDFインラインプレビュー（詳細ページ埋め込み用）
 │   ├── NoteEditor.tsx         ← メモの追加・編集・削除UI
 │   ├── NotesPanel.tsx         ← NoteEditorを包むスライドパネル（PdfMarkupPage・MarkdownViewPageで共用）
@@ -100,9 +100,9 @@ frontend/src/
 └── pages/
     ├── DocumentListPage.tsx   ← 文献一覧。フィルタ・ページネーション・一括操作・モーダル詳細
     ├── DocumentDetailPage.tsx ← 文献詳細ページ（DocumentDetailContentを使用）
-    ├── DocumentFormPage.tsx   ← 文献新規登録・編集フォーム
+    ├── DocumentFormPage.tsx   ← 文献新規登録・編集フォーム（Layout hideFabsでFABを非表示）
     ├── PdfMarkupPage.tsx      ← 別タブで開くPDFビューア（ペン・消しゴム・ズーム・パン・DeadZone）
-    ├── MarkdownViewPage.tsx   ← 別タブで開くMarkdownビューア（数式対応・編集・フォントサイズ・DeadZone）
+    ├── MarkdownViewPage.tsx   ← 別タブで開くMarkdownビューア（数式対応・編集・フォントサイズ・カスタムスクロールバー・しおり・DeadZone）
     ├── TagsPage.tsx           ← タグ管理
     ├── SettingsPage.tsx       ← アプリ設定
     ├── LoginPage.tsx          ← ログイン
@@ -220,6 +220,25 @@ MarkdownViewPage（別タブ）
 - 小・中・大・特大の4段階。`style.zoom` を `<main>` 要素に適用
 - スクロール位置を保持するため、変更前の読み位置（行テキスト+オフセット）をアンカーとして記録し、変更後に復元
 
+### カスタムスクロールバー
+- ブラウザ標準のスクロールバーを非表示にし、右端に幅10pxのカスタムバーを常時表示
+- スクロール位置（`el.scrollTop / (el.scrollHeight - el.clientHeight)`）をサムの位置に反映
+- `ResizeObserver` で内側コンテンツ `div`（`contentWrapRef`）を監視してサムの比率を更新する。スクロールコンテナ自体はFlexで高さが固定されるため、その外側ではなく内側を監視する点が重要
+- クリックで任意の位置にジャンプ。クリック座標のトラック内比率（`[0, 1]` にクランプ）から `scrollTop` を算出
+
+### しおり（ブックマーク）機能
+- 現在の読み位置をアンカー（`{ lineText: string; frac: number }`）として `localStorage` に保存
+- アンカーは最上部に見えている段落・見出し等のテキスト（50文字）と、スクロール率の両方を記録する。テキストが一致すれば行位置にジャンプし、一致しなければスクロール率でフォールバック
+- ページを開いた時点で `localStorage` からしおりを読み込み、コンテンツ読み込み完了後に自動復元
+- ツールバーに「🔖 しおり」（保存）、「🔖 しおりへ」（ジャンプ）、「更新」（上書き）、「×」（削除）ボタンを表示
+- ファイルIDをキーに `md_bookmark_{fileId}` で保存するため、複数のMarkdownファイルで独立したしおりを持てる
+
+### 数式モード（Raw Math / 自動挿入）
+- **自動挿入モード**（デフォルト）：`preprocessMath()` でdelimiterのない生LaTeXコマンドに `$...$` / `$$...$$` を補完してからレンダリング
+- **$区切りモード**：ファイルが既に `$...$` / `$$...$$` を含む場合、`preprocessMath()` をスキップしてそのままレンダリング
+- コンテンツ読み込み時に正規表現 `/\$\$[\s\S]+?\$\$|\$[^$\n]+?\$/` で自動判定し、ユーザー操作なしに適切なモードを選択
+- ツールバーの「自動$$」/「$区切り」ボタンで手動オーバーライド可能。保存時はオーバーライドをリセットし、次の自動判定が再度走る
+
 ### DeadZone統合
 - `DeadZonePanel` をツールバー上のボタンから開く
 - `isInDeadZone()` でタッチ開始位置を判定し、不感領域内なら `touchstart` / `pointerdown` をキャンセル
@@ -233,11 +252,13 @@ MarkdownViewPage（別タブ）
 `remark-math` + `rehype-katex` のパイプラインを使用しない。理由：`remark-math` が `$...$` をASTノードに変換するが、`rehype-katex` のレンダリングが失敗するとテキストがDOMから消失し、auto-renderが検出できなくなるため。
 
 代わりに：
-1. `preprocessMath()` （`utils/mathPreprocess.ts`）でdelimiterのない生LaTeXコマンドに `$...$` / `$$...$$` を自動補完
+1. `preprocessMath()` （`utils/mathPreprocess.ts`）でdelimiterのない生LaTeXコマンドに `$...$` / `$$...$$` を自動補完（**Raw Mathモードのときはスキップ**）
 2. `<ReactMarkdown>` をプラグインなしで呼び出し → `$...$` がプレーンテキストとしてDOMに出力される
 3. `useEffect([content])` で `renderMathInElement(containerRef.current, ...)` を呼び出し、DOMを直接処理
 
 `preprocessMath()` の挙動：CJKを含む行はインライン数式として各コマンドに `$...$` を付加、CJKのない行は行全体を `$$...$$` でブロック数式として扱う。
+
+`MarkdownViewer` は `rawMath` prop（`boolean`）を受け取る。`true` のとき `preprocessMath()` をバイパスしてコンテンツをそのままレンダリングする。`onContentLoaded` prop（`(text: string) => void`）はフェッチ完了後に一度だけ呼ばれる。
 
 ---
 
@@ -292,6 +313,10 @@ const apiBase = (() => {
 | `DocumentDetailContent` コンポーネント化 | フルページ（DocumentDetailPage）とモーダル（DocumentDetailModal）で同一UIを共用するため |
 | `MarkdownViewer` を `MarkdownViewPage` 内で再利用 | フェッチ・数式レンダリングロジックの重複を排除 |
 | `preprocessMath()` によるLaTeX前処理 | delimiterなしの生LaTeXコマンドをKaTeX auto-renderが認識できる形式に変換するため |
+| Raw Mathモードの自動判定 | ファイルが既に `$...$` / `$$...$$` を含む場合に `preprocessMath()` が二重ラップするのを防ぐため。コンテンツロード時に正規表現で判定し、ユーザーが手動オーバーライドも可能 |
+| カスタムスクロールバーでの `ResizeObserver` 対象をコンテンツdivにする | スクロールコンテナはFlexで高さ固定のため `scrollHeight` が変わってもboxサイズは変わらず `ResizeObserver` が発火しない。内側コンテンツdivを観察することで正しく検出できる |
+| しおりアンカーを行テキスト+スクロール率の両方で記録 | 編集後に行位置がずれた場合でもスクロール率でフォールバックし、可能な限り近い位置に復元するため |
+| `Layout hideFabs` で文献フォーム中のFABを非表示 | 文献追加・編集中にフローティングボタンが視覚的に干渉するのを防ぐため |
 | DeadZone機能 | タブレットを手で持ちながら操作する際、端を誤タッチしてもキャンバスへの描画やスクロールが起きないようにするため |
 | PDFFileに独自file_idを付与 | 1文献に複数のPDF/MDファイルを添付できる設計。ルートも `:fileId` を含む |
 | スクロールコンテナに `touchAction: 'none'` | DeadZone内のタッチをOSのネイティブジェスチャーセッションから切り離すことで、Apple Pencilイベントが抑制されるのを防ぐ |

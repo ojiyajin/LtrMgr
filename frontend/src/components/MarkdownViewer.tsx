@@ -25,6 +25,7 @@ interface Props {
   docId: string
   fileId: string
   fontScale?: number
+  rawMath?: boolean
   markupEnabled?: boolean
   tool?: 'pen' | 'highlighter' | 'eraser'
   color?: string
@@ -33,12 +34,14 @@ interface Props {
   onStrokeCountChange?: (n: number) => void
   markupHandleRef?: React.MutableRefObject<MarkdownMarkupHandle | null>
   scrollRef?: React.RefObject<HTMLDivElement | null>
+  onContentLoaded?: (text: string) => void
 }
 
 export function MarkdownViewer({
   docId,
   fileId,
   fontScale = 1,
+  rawMath = false,
   markupEnabled = false,
   tool = 'pen',
   color = '#ef4444',
@@ -47,6 +50,7 @@ export function MarkdownViewer({
   onStrokeCountChange,
   markupHandleRef,
   scrollRef,
+  onContentLoaded,
 }: Props) {
   const [content, setContent] = useState<string | null>(null)
   const [error, setError] = useState(false)
@@ -83,9 +87,9 @@ export function MarkdownViewer({
     setContent(null)
     setError(false)
     getFileContent(docId, fileId)
-      .then(text => setContent(text))
+      .then(text => { setContent(text); onContentLoaded?.(text) })
       .catch(() => setError(true))
-  }, [docId, fileId])
+  }, [docId, fileId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load saved strokes whenever the file changes
   useEffect(() => {
@@ -445,7 +449,7 @@ export function MarkdownViewer({
               remarkPlugins={[remarkMath]}
               rehypePlugins={[[rehypeKatex, { throwOnError: false }]]}
             >
-              {preprocessMath(content)}
+              {rawMath ? content : preprocessMath(content)}
             </ReactMarkdown>
       }
     </div>

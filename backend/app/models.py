@@ -47,6 +47,7 @@ class User(Base):
     __tablename__ = "users"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=new_uuid)
+    username: Mapped[str | None] = mapped_column(String, unique=True, nullable=True)
     email: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     hashed_password: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)

@@ -1,8 +1,20 @@
 import { client } from './client'
 
+export type AuthMode = 'personal' | 'team' | 'secure'
+
 export interface LoginPayload { username: string; password: string }
-export interface RegisterPayload { email: string; password: string }
-export interface UserOut { id: string; email: string; created_at: string }
+export interface RegisterPayload { username: string; password: string }
+export interface UserOut { id: string; username: string | null; email: string; created_at: string }
+
+export async function getAuthMode(): Promise<AuthMode> {
+  const { data } = await client.get<{ mode: AuthMode }>('/auth/mode')
+  return data.mode
+}
+
+export async function teamJoin(username: string): Promise<string> {
+  const { data } = await client.post<{ access_token: string }>('/auth/join', { username })
+  return data.access_token
+}
 
 export async function login(p: LoginPayload): Promise<string> {
   const form = new URLSearchParams({ username: p.username, password: p.password })

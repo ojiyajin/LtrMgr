@@ -19,6 +19,15 @@ async def get_db() -> AsyncSession:
 
 async def _migrate(conn):
     """Add columns/tables introduced after the initial schema."""
+    # username column on users (auth mode support)
+    rows = await conn.execute(text("PRAGMA table_info(users)"))
+    user_cols = {r[1] for r in rows.fetchall()}
+    if "username" not in user_cols:
+        await conn.execute(text("ALTER TABLE users ADD COLUMN username VARCHAR"))
+        await conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_users_username ON users(username) WHERE username IS NOT NULL"
+        ))
+
     # read_status column on documents
     rows = await conn.execute(text("PRAGMA table_info(documents)"))
     cols = {r[1] for r in rows.fetchall()}
